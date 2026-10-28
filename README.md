@@ -27,7 +27,7 @@ Go 网关保持不动、继续当唯一事实源；插件只做外壳——原�
 
 ```powershell
 plugin_manager install_bundle  target=<本仓库的绝对路径>
-# 改动后强制重载：
+# 改配置后让它重新应用（注意：这不重载代码，见下文）
 plugin_manager set_plugin     target=include:wb2api-panel enabled=false
 plugin_manager set_plugin     target=include:wb2api-panel enabled=true
 ```
@@ -86,12 +86,18 @@ git clone https://github.com/cv9421/dsh-wb2api
 plugin_manager install_bundle  target=<克隆目录的绝对路径>
 ```
 
-装完在 **设置 → WorkBuddy 网关** 里配置；改 `cordis.patch.yml` 后重载：
+装完在 **设置 → WorkBuddy 网关** 里配置。
+
+只改了 `cordis.patch.yml` 里的**配置值**，disable/enable 就能重新应用：
 
 ```powershell
 plugin_manager set_plugin  target=include:wb2api-panel enabled=false
 plugin_manager set_plugin  target=include:wb2api-panel enabled=true
 ```
+
+> **升级插件代码后必须完全退出并重启 DSH。**
+> 实测：disable/enable 只重新跑 `apply()`，**不会重新加载模块**（ESM 模块缓存按 URL 命中），
+> 新代码不生效、页面也看不到新字段。别拿它当"更新"用——只有重启进程才会加载新版本。
 ## 配置
 
 装配行在 `cordis.patch.yml`，字段也可以用环境变量覆盖（环境变量优先）：

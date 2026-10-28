@@ -20,7 +20,11 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(HERE, '..');
+// 允许指向「已装好的那一份」，用来验证 GitHub 安装产物而不是仓库工作区：
+//   $env:WB2API_PLUGIN_DIR='C:\Users\...\node_modules\dsh-wb2api-panel'; node test/run.mjs
+const ROOT = process.env.WB2API_PLUGIN_DIR
+  ? path.resolve(process.env.WB2API_PLUGIN_DIR)
+  : path.resolve(HERE, '..');
 const BASE = process.env.WB2API_TEST_BASE || 'http://127.0.0.1:5954';
 const PANEL = process.env.WB2API_TEST_PANEL || 'http://127.0.0.1:7863';
 

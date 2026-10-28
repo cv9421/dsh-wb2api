@@ -72,6 +72,19 @@ export function apply(ctx, config = {}) {
   const exePath = () => (panelDir() ? path.join(panelDir(), cfg.exe || DEFAULTS.exe) : '');
 
   /** api_key: explicit config wins, otherwise read the gateway's own config.json. */
+  /** key 从哪来的：排查 401 时唯一有用的一条信息。 */
+  const apiKeySource = () => {
+    if (cfg.apiKey) return 'config';
+    const file = panelDir() && path.join(panelDir(), 'config.json');
+    if (!file || !existsSync(file)) return 'none';
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8'));
+      return typeof parsed.api_key === 'string' && parsed.api_key ? 'config.json' : 'none';
+    } catch {
+      return 'none';
+    }
+  };
+
   const apiKey = () => {
     if (cfg.apiKey) return String(cfg.apiKey);
     const file = panelDir() && path.join(panelDir(), 'config.json');
@@ -113,7 +126,16 @@ export function apply(ctx, config = {}) {
       } catch {
         data = { raw: text.slice(0, 4000) };
       }
-      return { ok: res.ok, status: res.status, data };
+      const result = { ok: res.ok, status: res.status, data };
+      // 401 且没带 key：这是「路径没配对」而不是「密码错了」，必须说清该配哪个字段，
+      // 否则用户面对的只是一堆 HTTP 401。
+      if (res.status === 401 && !key) {
+        result.error =
+          'HTTP 401：请求没带 api_key（' +
+          (panelDir() ? '面板目录找到了，但 config.json 里没有 api_key' : '没找到面板目录，读不到 config.json 的 api_key') +
+          '）。请设 apiKey，或设 WB2API_PANEL_DIR / WB2API_KEY 指向网关目录与 key。';
+      }
+      return result;
     } catch (error) {
       return { ok: false, status: 0, error: String(error && error.message ? error.message : error) };
     }
@@ -291,6 +313,7 @@ export function apply(ctx, config = {}) {
       // 注入兜底要写这个目录：暴露出来才能判断「写不进去」是权限还是路径算错。
       profileDir: selfProfileDir(),
       apiConfigured: Boolean(apiKey()),
+      apiKeySource: apiKeySource(),
       // 注入状态给 UI 用：失败原因要能在页面上看到，而不是只进 stderr。
       provider: injectState.provider,
       credential: injectState.credential,

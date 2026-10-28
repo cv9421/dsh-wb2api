@@ -78,6 +78,7 @@ window.__ModuleLoader__.load({
       noKey: '未读到 api_key',
       noPanelDir: '未配置面板目录：只能看数据，无法托管进程（请在 cordis.patch.yml 设 panelDir 或设 WB2API_PANEL_DIR）',
   providerBroken: '模型提供商未注册',
+  noKeyHint: '没有读到 api_key：面板目录没找到或 config.json 缺字段。请设 apiKey，或设 WB2API_PANEL_DIR / WB2API_KEY。',
   providerNoAdapter: '缺少 llm-pi-ai',
       loginRealm: '登录区服',
       loginCn: '国内版（cn）',
@@ -192,6 +193,7 @@ window.__ModuleLoader__.load({
       noKey: 'api_key not found',
       noPanelDir: 'No panel directory: read-only. Set panelDir in cordis.patch.yml or WB2API_PANEL_DIR.',
   providerBroken: 'Model provider not registered',
+  noKeyHint: 'No api_key resolved: panel directory not found or config.json lacks the field. Set apiKey, WB2API_PANEL_DIR, or WB2API_KEY.',
   providerNoAdapter: 'llm-pi-ai missing',
       loginRealm: 'Realm',
       loginCn: 'China (cn)',
@@ -1332,6 +1334,7 @@ window.__ModuleLoader__.load({
           h('button', { className: 'wb2p-btn danger', disabled: Boolean(busy) || !online, onClick: () => proc('stop') }, T('stop')),
         ),
         error ? h('div', { className: 'wb2p-error' }, error) : null,
+        snap && snap.apiKeySource === 'none' ? h('div', { className: 'wb2p-error' }, T('noKeyHint')) : null,
         note ? h('div', { className: 'wb2p-note' }, note) : null,
         providerWarning ? h('div', { className: 'wb2p-error' }, providerWarning) : null,
         h(
