@@ -103,8 +103,8 @@ top-level entries: 8
 
 ## 5. 仍然存在的限制（不藏）
 
-1. **升级代码必须重启 DSH。** disable/enable 只重新 `apply()`，ESM 模块缓存按 URL 命中，
-   不会重新加载文件。这是宿主行为，插件侧无法绕过——已写进 README。
+1. **升级代码别用 disable/enable。** 它只重新 `apply()`，不重载模块（ESM 按 URL 缓存）；
+   实测 `remove_bundle` + `install_bundle` 会触发重新加载，最稳仍是重启 DSH。插件已加 `code.stale` 检测：磁盘变了而内存还是旧代码时，页面直接提示重启。
 2. **UI 视觉未做人工确认。** 页面需要 `dsh web` 登录态，我只能验证到
    `/wb2api/state` 的数据结构、client 模块可渲染、8 个页签的渲染用例。
    提示条（`缺少 llm-pi-ai` / `没有读到 api_key`）的**实际观感**没有亲眼确认。
