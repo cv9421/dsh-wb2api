@@ -632,12 +632,22 @@ async function sectionHost(host) {
     return 'listen=' + value.config.listen;
   });
 
-  await check('host', 'version-gated tools degrade to a 404 instead of throwing', async () => {
-    const keys = await tool('wb2api_clientkeys').execute({}, {});
-    const security = await tool('wb2api_security').execute({}, {});
-    assert(keys.ok === false || keys.status === 404, 'clientkeys should be gated on this binary');
-    assert(security.ok === false || security.status === 404, 'security should be gated on this binary');
-    return `clientkeys=${keys.status} security=${security.status}`;
+  // 这两个端点在旧二进制上不存在、新二进制上存在。用例不能写死 404：
+  // 只要求「要么给数据，要么明确 404」，不许抛错、不许静默假成功。
+  await check('host', 'clientkeys / security 要么可用要么明确 404，不许静默', async () => {
+    const out = [];
+    for (const name of ['wb2api_clientkeys', 'wb2api_security']) {
+      const value = await tool(name).execute({}, {});
+      if (value.status === 404) {
+        assert(value.ok === false, name + ': 404 却报 ok');
+        out.push(name + '=404');
+      } else {
+        assert(value.status === 200 && value.ok === true, name + ': 状态异常 ' + value.status);
+        assert(value.data && typeof value.data === 'object', name + ': 200 但无数据');
+        out.push(name + '=200');
+      }
+    }
+    return out.join(' ');
   });
 
   await check('host', 'model gate is supported and round-trips, or is honestly gated', async () => {
@@ -648,7 +658,8 @@ async function sectionHost(host) {
       const res = await tool('wb2api_models').execute({ action: 'toggle', id: target.id, enabled: false }, {});
       assert(res.ok === false && res.gateSupported === false, 'unsupported gate did not report itself');
       assert(/no per-model gate/.test(res.error), 'unsupported gate message unclear');
-      return 'gate absent on this binary (reported, not silent)';
+      assert(['hidden', 'disabled', null].includes(list.gateConfigKey), 'gateConfigKey 形态异常: ' + list.gateConfigKey);
+      return '面板无开关，配置键=' + list.gateConfigKey + '（明确自报，不静默）';
     }
     const off = await tool('wb2api_models').execute({ action: 'toggle', id: target.id, enabled: false }, {});
     assert(off.ok === true, 'disable failed: ' + JSON.stringify(off).slice(0, 160));

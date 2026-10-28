@@ -121,6 +121,7 @@ window.__ModuleLoader__.load({
       size: '总量',
       notSupported: '当前二进制版本不支持该端点（升级 wb2api 后可用）',
       gateUnsupported: '当前二进制没有逐模型准入开关（升级 wb2api 后可用），此处只读展示模型清单',
+      gateHidden: '本版本用 config.models.hidden 控制模型隐藏（面板只读，改配置后热生效）',
       section_logs: '日志',
     };
 
@@ -232,6 +233,7 @@ window.__ModuleLoader__.load({
       size: 'Size',
       notSupported: 'This endpoint does not exist in the running binary (upgrade wb2api).',
       gateUnsupported: 'This binary has no per-model gate; the list below is read-only until you upgrade wb2api.',
+      gateHidden: 'This build hides models through config.models.hidden (read-only here; edit config to change).',
     };
 
     const isZh = () => {
@@ -463,9 +465,10 @@ window.__ModuleLoader__.load({
         try {
           const cfg = await getPanel('/panel/api/config');
           const map = cfg && cfg.config ? cfg.config : cfg;
-          setGate(Boolean(map && map.models && Array.isArray(map.models.disabled)));
+          const mc = (map && map.models) || {};
+          setGate(Array.isArray(mc.disabled) ? 'toggle' : Array.isArray(mc.hidden) ? 'hidden' : 'none');
         } catch {
-          setGate(false);
+          setGate('none');
         }
       }, []);
 
@@ -575,7 +578,7 @@ window.__ModuleLoader__.load({
           try {
             await postPanel('/panel/api/models/toggle', { id: model.id, disabled: !model.disabled });
           } catch (err) {
-            if (Number(err && err.status) === 404) setGate(false);
+            if (Number(err && err.status) === 404) setGate('none');
             throw err;
           }
           await loadModels();
@@ -1041,7 +1044,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'wb2p-sub' }, filtered.length + ' / ' + list.length),
             h('button', { className: 'wb2p-btn', onClick: () => safely('models', loadModels) }, T('refresh')),
           ),
-          gate === false ? h('div', { className: 'wb2p-note' }, pill(T('gateUnsupported'), 'warn')) : null,
+          gate === 'hidden' ? h('div', { className: 'wb2p-note' }, pill(T('gateHidden'), 'warn')) : gate === 'none' ? h('div', { className: 'wb2p-note' }, pill(T('gateUnsupported'), 'warn')) : null,
           h(
             'div',
             { className: 'wb2p-scroll' },
@@ -1077,7 +1080,7 @@ window.__ModuleLoader__.load({
                         h(
                           'td',
                           null,
-                          gate === false
+                          gate !== 'toggle'
                             ? pill('—')
                             : model.disabled
                               ? pill(T('blocked'), 'err')
@@ -1091,7 +1094,7 @@ window.__ModuleLoader__.load({
                             role: 'switch',
                             'aria-checked': model.disabled ? 'false' : 'true',
                             'aria-label': model.id,
-                            disabled: Boolean(busy) || gate === false,
+                            disabled: Boolean(busy) || gate !== 'toggle',
                             onClick: () => toggleModel(model),
                           }),
                         ),

@@ -157,6 +157,30 @@ export function apply(ctx, config = {}) {
     });
   }
 
+  /** 监听某端口的进程（pid 文件过期 / 进程被外部拉起时的兜底）。 */
+  function pidOnPort(port) {
+    return new Promise((resolve) => {
+      if (process.platform === 'win32') {
+        execFile('netstat', ['-ano'], (error, stdout) => {
+          if (error || !stdout) return resolve(0);
+          for (const line of stdout.split(/\r?\n/)) {
+            if (!/LISTENING/i.test(line)) continue;
+            const cols = line.trim().split(/\s+/);
+            if (cols.length < 5) continue;
+            if (!(cols[1] || '').endsWith(':' + port)) continue;
+            return resolve(Number(cols[cols.length - 1]) || 0);
+          }
+          resolve(0);
+        });
+        return;
+      }
+      execFile('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], (error, stdout) => {
+        if (error || !stdout) return resolve(0);
+        resolve(Number(String(stdout).trim().split(/\s+/)[0]) || 0);
+      });
+    });
+  }
+
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   async function start({ waitMs = 12000 } = {}) {
@@ -191,7 +215,7 @@ export function apply(ctx, config = {}) {
   async function stop() {
     const before = await health();
     if (!before.running) return { ok: true, already: true, status: before };
-    const pids = new Set([readPidFile(), state.child].filter(Boolean));
+    const pids = new Set([readPidFile(), state.child, await pidOnPort(target().port)].filter(Boolean));
     const killed = [];
     for (const pid of pids) {
       if (await killPid(pid)) killed.push(pid);
@@ -474,12 +498,17 @@ export function apply(ctx, config = {}) {
       // older builds answer /models without any gate endpoint at all.
       const cfgRes = await callPanel('/panel/api/config');
       const cfg = cfgRes.ok ? unwrapConfig(cfgRes.data) : null;
-      const gateSupported = Boolean(cfg && cfg.models && Array.isArray(cfg.models.disabled));
-      const disabledList = gateSupported ? cfg.models.disabled : [];
+      const gateCfg = (cfg && cfg.models) || {};
+      // 面板能否直接切换，取决于该二进制是否持久化 models.disabled（它同时带 toggle 端点）。
+      // fork 用的是 models.hidden：配置可隐藏，但面板没有开关，这里如实区分。
+      const toggleAvailable = Array.isArray(gateCfg.disabled);
+      const gateConfigKey = toggleAvailable ? 'disabled' : Array.isArray(gateCfg.hidden) ? 'hidden' : null;
+      const disabledList = gateConfigKey ? gateCfg[gateConfigKey] : [];
       return {
         ok: true,
         count: models.length,
-        gateSupported,
+        gateSupported: toggleAvailable,
+        gateConfigKey,
         disabled: disabledList,
         models: models.map((model) => ({
           id: model.id,
@@ -490,7 +519,7 @@ export function apply(ctx, config = {}) {
           max_output_tokens: model.max_output_tokens,
           supports_images: model.supports_images,
           supports_tool_call: model.supports_tool_call,
-          disabled: gateSupported ? disabledList.includes(model.id) : null,
+          disabled: gateConfigKey ? disabledList.includes(model.id) : null,
         })),
       };
     },
