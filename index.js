@@ -892,6 +892,21 @@ export function apply(ctx, config = {}) {
       if (Number.isFinite(ctxLen) && ctxLen > 0) entry.contextWindow = Math.trunc(ctxLen);
       const maxOut = Number(model.max_output_tokens || model.max_tokens);
       if (Number.isFinite(maxOut) && maxOut > 0) entry.maxTokens = Math.trunc(maxOut);
+
+      // 档位（reasoning efforts）：不注入这里，模型选择器就只有「默认」一档，
+      // 等于把网关支持的 low/high/max 全吞掉了。
+      // 两个端点字段名不同：/v1/models 用 reasoning_supported_efforts，
+      // /panel/api/models 用 supported_efforts。两个都认。
+      const effortsList = model.reasoning_supported_efforts || model.supported_efforts;
+      if (model.supports_reasoning === false) {
+        entry.reasoningEfforts = false;
+      } else if (Array.isArray(effortsList) && effortsList.length) {
+        const efforts = {};
+        for (const effort of effortsList) {
+          if (typeof effort === 'string' && effort) efforts[effort] = effort;
+        }
+        if (Object.keys(efforts).length) entry.reasoningEfforts = efforts;
+      }
       return entry;
     });
   }
@@ -950,8 +965,11 @@ export function apply(ctx, config = {}) {
     if (!entry) return { ok: false, reason: 'llm-pi-ai row not found in profile' };
 
     const withProviders = (base) => (base && typeof base.providers === 'object' && base.providers) || {};
-    if (withProviders(currentEntryConfig(editor, entry))[PROVIDER_ID]) {
-      return { ok: true, already: true, entryId: entry.id };
+    const existing = withProviders(currentEntryConfig(editor, entry))[PROVIDER_ID];
+    if (existing) {
+      // 已注入过：只有当网关模型带档位、而现有条目没有时才重建（补漏洞）。
+      const stale = (existing.models || []).some((m) => m && m.reasoningEfforts === undefined);
+      if (!stale) return { ok: true, already: true, entryId: entry.id };
     }
 
     const models = await fetchProviderModels();
@@ -991,9 +1009,17 @@ export function apply(ctx, config = {}) {
     }
     try {
       const info = await store.describe(PROVIDER_KEY_REF);
-      if (info && info.configured) return { ok: true, already: true, writable: info.writable };
+      let current = null;
+      try {
+        const resolved = await store.resolve(PROVIDER_KEY_REF);
+        current = resolved && resolved.value ? resolved.value : null;
+      } catch {
+        current = null;
+      }
+      // 「已配置」不等于「配置对了」：DSH 侧报 AUTH 时最常见的就是存了旧 key。
+      if (current === key) return { ok: true, already: true, writable: info && info.writable };
       await store.set(PROVIDER_KEY_REF, key);
-      return { ok: true, stored: true };
+      return { ok: true, stored: true, replaced: Boolean(current) };
     } catch (error) {
       return { ok: false, reason: String((error && error.message) || error) };
     }
