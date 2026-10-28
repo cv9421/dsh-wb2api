@@ -11,7 +11,7 @@
  * credit or routing logic, it only reads the panel JSON API and shells the binary.
  */
 import { spawn, execFile } from 'node:child_process';
-import { readFileSync, existsSync, mkdirSync, openSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync } from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 
@@ -23,6 +23,9 @@ const DEFAULTS = {
   apiKey: '',
   panelDir: '',
   exe: 'wb2api.exe',
+  autoStart: true,
+  stopOnUnload: true,
+  injectProvider: true,
 };
 
 /** Paths the proxy may reach; anything else is refused so this never becomes an open proxy. */
@@ -608,6 +611,53 @@ export function apply(ctx, config = {}) {
   });
 
   tool({
+    name: 'wb2api_provider',
+    description:
+      '把本机网关注册成 DSH 模型提供商（profile 的 llm-pi-ai.providers.wb2api）。action=status 只看状态，action=inject 执行注入（幂等，带备份与回读校验），action=credential 把网关 key 写进凭据库 WB2API_API_KEY。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['status', 'inject', 'credential'] },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    async execute(args) {
+      const action = (args && args.action) || 'status';
+      const file = profilePatchPath();
+      if (action === 'status') {
+        const editor = ctx.get('configEditor');
+        let shape = { available: Boolean(editor), hasEntries: Boolean(editor && typeof editor.entries === 'function') };
+        if (shape.hasEntries) {
+          const rows = editor.entries() || [];
+          shape.count = rows.length;
+          shape.sample = rows.slice(0, 4).map((row) => ({
+            keys: row && typeof row === 'object' ? Object.keys(row) : [],
+            id: row && row.id,
+            name: row && row.name,
+            patchId: row && row.patchId,
+          }));
+          shape.matchesLlm = rows
+            .filter((row) => {
+              const blob = JSON.stringify(row && typeof row === 'object' ? { id: row.id, name: row.name, patchId: row.patchId } : row);
+              return /llm-pi-ai|dsh-llm/.test(blob);
+            })
+            .slice(0, 5)
+            .map((row) => ({ id: row.id, name: row.name, patchId: row.patchId }));
+        }
+        let models = 0;
+        try {
+          models = (await fetchProviderModels()).length;
+        } catch {
+          models = -1;
+        }
+        return { ok: true, patchFile: file || '(DSH_PROFILE_DIR unset)', shape, gatewayModels: models };
+      }
+      if (action === 'credential') return await ensureProviderCredential();
+      return await ensureProvider();
+    },
+  });
+  tool({
     name: 'wb2api_bulk',
     description: '对全部账号批量执行网关日常任务：checkin 签到 / balance 刷新余额 / travel 旅行 / activity 活跃 / keepalive 保活。',
     parameters: {
@@ -810,6 +860,201 @@ export function apply(ctx, config = {}) {
     },
   });
 
+  // ------------------------------------------------------- provider injection
+  //
+  // 把本机网关注入成 DSH 的一个模型提供商（profile 的 llm-pi-ai.providers.wb2api）。
+  //
+  // 为什么走 llm-pi-ai 而不是自己写 adapter：
+  //   1) 网关本身就是 OpenAI 兼容协议，llm-pi-ai 的 api: openai-completions 直接能连；
+  //   2) apiKeyEnv 是「credential reference」，凭据库里的值优先于环境变量，
+  //      所以 key 由 credentials.set() 写进凭据库即可，配置文件里不出现明文；
+  //   3) 自己实现 LlmAdapter 要重做 tool-call 流式拼装 / reasoning delta / usage /
+  //      finish 映射 / 错误码归一，且随 DSH 内部契约漂移，收益为负。
+  //
+  // 幂等：已存在 wb2api 段就跳过。可关：config.injectProvider = false。
+
+  const PROVIDER_ID = 'wb2api';
+  const PROVIDER_KEY_REF = 'WB2API_API_KEY';
+
+  function profilePatchPath() {
+    const dir = process.env.DSH_PROFILE_DIR;
+    return dir ? path.join(dir, 'cordis.patch.yml') : '';
+  }
+
+  /** 从网关 /v1/models 取模型目录，转成 llm-pi-ai 的 models[] 形状。 */
+  async function fetchProviderModels() {
+    const res = await callPanel('/v1/models', { timeoutMs: 30000 });
+    const list = (res && res.ok && res.data && Array.isArray(res.data.data)) ? res.data.data : [];
+    return list.map((model) => {
+      const entry = { id: String(model.id) };
+      if (model.name) entry.name = String(model.name);
+      const ctxLen = Number(model.context_length || model.context_window);
+      if (Number.isFinite(ctxLen) && ctxLen > 0) entry.contextWindow = Math.trunc(ctxLen);
+      const maxOut = Number(model.max_output_tokens || model.max_tokens);
+      if (Number.isFinite(maxOut) && maxOut > 0) entry.maxTokens = Math.trunc(maxOut);
+      return entry;
+    });
+  }
+
+  function yamlProviderBlock(models) {
+    const lines = [
+      `      ${PROVIDER_ID}:`,
+      `        displayName: WorkBuddy 网关`,
+      `        api: openai-completions`,
+      `        baseURL: ${baseUrl()}/v1`,
+      `        apiKeyEnv: ${PROVIDER_KEY_REF}`,
+      `        defaultInput:`,
+      `          - text`,
+      `          - image`,
+      `        compat:`,
+      `          supportsReasoningEffort: true`,
+      `        models:`,
+    ];
+    for (const model of models) {
+      lines.push(`          - id: ${JSON.stringify(model.id)}`);
+      if (model.name) lines.push(`            name: ${JSON.stringify(model.name)}`);
+      if (model.contextWindow) lines.push(`            contextWindow: ${model.contextWindow}`);
+      if (model.maxTokens) lines.push(`            maxTokens: ${model.maxTokens}`);
+      lines.push(`            input: [text, image]`);
+    }
+    return lines.join('\n');
+  }
+
+  /** 找到 llm-pi-ai 的 profile 行（configEditor 是官方入口，不依赖环境变量/文件路径）。 */
+  function findLlmEntry(editor) {
+    if (!editor || typeof editor.entries !== 'function') return null;
+    const rows = editor.entries() || [];
+    // Entry.id 是 Loader 全 id（include:llm-pi-ai），没有 name/patchId 字段可依赖。
+    return rows.find((row) => row && typeof row.id === 'string' && /(^|:)llm-pi-ai$/.test(row.id)) || null;
+  }
+
+  /** 当前该行的有效配置（inherited 打底，override 覆盖）。 */
+  function currentEntryConfig(editor, entry) {
+    try {
+      const rows = (typeof editor.configuration === 'function' && editor.configuration()) || [];
+      const hit = rows.find((row) => row && row.entry && (row.entry === entry || row.entry.id === entry.id));
+      if (hit) return { ...(hit.inherited || {}), ...(hit.override || {}) };
+    } catch {
+      /* 退回只读 override */
+    }
+    const raw = (entry && entry.config) || {};
+    return { ...raw };
+  }
+
+  async function ensureProvider() {
+    const editor = ctx.get('configEditor');
+    if (!editor || typeof editor.edit !== 'function') {
+      return { ok: false, reason: 'configEditor service unavailable' };
+    }
+    const entry = findLlmEntry(editor);
+    if (!entry) return { ok: false, reason: 'llm-pi-ai row not found in profile' };
+
+    const withProviders = (base) => (base && typeof base.providers === 'object' && base.providers) || {};
+    if (withProviders(currentEntryConfig(editor, entry))[PROVIDER_ID]) {
+      return { ok: true, already: true, entryId: entry.id };
+    }
+
+    const models = await fetchProviderModels();
+    if (!models.length) return { ok: false, reason: 'gateway advertised no models' };
+
+    const profile = {
+      displayName: 'WorkBuddy 网关',
+      api: 'openai-completions',
+      baseURL: baseUrl() + '/v1',
+      apiKeyEnv: PROVIDER_KEY_REF,
+      defaultInput: ['text', 'image'],
+      compat: { supportsReasoningEffort: true },
+      models,
+    };
+
+    try {
+      await editor.edit(entry, (current, inherited) => {
+        const merged = { ...(inherited || {}), ...(current || {}) };
+        const providers = { ...withProviders(merged), [PROVIDER_ID]: profile };
+        return { ...(current || {}), providers };
+      });
+    } catch (error) {
+      return { ok: false, reason: 'edit failed: ' + String((error && error.message) || error) };
+    }
+
+    const after = findLlmEntry(ctx.get('configEditor'));
+    const landed = Boolean(after && withProviders(currentEntryConfig(ctx.get('configEditor'), after))[PROVIDER_ID]);
+    return { ok: landed, injected: landed ? models.length : 0, entryId: entry.id, verified: landed };
+  }
+
+  /** key 写进凭据库：apiKeyEnv 解析时优先于环境变量，配置文件里不落明文。 */
+  async function ensureProviderCredential() {
+    const store = ctx.get('credentials');
+    const key = apiKey();
+    if (!store || typeof store.set !== 'function' || !key) {
+      return { ok: false, reason: store ? 'no api key' : 'credentials service unavailable' };
+    }
+    try {
+      const info = await store.describe(PROVIDER_KEY_REF);
+      if (info && info.configured) return { ok: true, already: true, writable: info.writable };
+      await store.set(PROVIDER_KEY_REF, key);
+      return { ok: true, stored: true };
+    } catch (error) {
+      return { ok: false, reason: String((error && error.message) || error) };
+    }
+  }
+  // ---------------------------------------------------------------- lifecycle
+  //
+  // 与 Harness 同生共死（可用 config 关掉）：
+  //   autoStart   插件装载时若网关没在跑就拉起来（幂等，已在跑就跳过）
+  //   stopOnUnload 插件卸载时把网关停掉
+  //
+  // 注意：只覆盖「正常装载/卸载」。Harness 被强杀时 Node 不会执行 dispose，
+  // 网关会变成孤儿进程——这一点靠插件无法兜住，需要宿主侧的父进程监护。
+  if (cfg.injectProvider !== false) {
+    const timer2 = setTimeout(async () => {
+      try {
+        const cred = await ensureProviderCredential();
+        const injected = await ensureProvider();
+        if (!injected.ok && !injected.already) {
+          console.error('[wb2api-panel] provider injection skipped:', injected.reason);
+        }
+        if (!cred.ok && !cred.already) {
+          console.error('[wb2api-panel] credential not stored:', cred.reason);
+        }
+      } catch (error) {
+        console.error('[wb2api-panel] provider injection error:', error);
+      }
+    }, 2200);
+    if (timer2 && typeof timer2.unref === 'function') timer2.unref();
+    ctx.effect(() => () => clearTimeout(timer2), 'wb2api-panel provider timer');
+  }
+  if (cfg.autoStart !== false) {
+    const timer = setTimeout(async () => {
+      try {
+        const probe = await health();
+        if (!probe.running) {
+          const started = await start();
+          if (!started.ok) {
+            // 没有 panelDir / exe 不是错误：远程网关模式本来就不该起本地进程。
+            if (started.error && !/not found|unset/.test(started.error)) {
+              console.error('[wb2api-panel] autoStart failed:', started.error);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[wb2api-panel] autoStart error:', error);
+      }
+    }, 1200);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+    ctx.effect(() => () => clearTimeout(timer), 'wb2api-panel autostart timer');
+  }
+
+  if (cfg.stopOnUnload !== false) {
+    ctx.effect(
+      () => () => {
+        Promise.resolve()
+          .then(() => stop())
+          .catch(() => {});
+      },
+      'wb2api-panel stop on unload',
+    );
+  }
   // Process supervision is user-controlled: unloading the plugin never kills the gateway.
   ctx.effect(() => () => {
     state.child = null;

@@ -284,6 +284,8 @@ async function loadHostModule() {
   module.apply(ctx, {
     baseUrl: PANEL,
     panelDir: path.resolve(ROOT, '..', 'workbuddy2api-panel'),
+    autoStart: false,      // 测试不碰宿主生命周期
+    stopOnUnload: false,
   });
   return { module, captured };
 }
