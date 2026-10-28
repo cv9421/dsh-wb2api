@@ -95,9 +95,13 @@ plugin_manager set_plugin  target=include:wb2api-panel enabled=false
 plugin_manager set_plugin  target=include:wb2api-panel enabled=true
 ```
 
-> **升级插件代码后必须完全退出并重启 DSH。**
-> 实测：disable/enable 只重新跑 `apply()`，**不会重新加载模块**（ESM 模块缓存按 URL 命中），
-> 新代码不生效、页面也看不到新字段。别拿它当"更新"用——只有重启进程才会加载新版本。
+> **升级插件代码后，别指望 disable/enable。**
+> 实测：disable/enable 只重新跑 `apply()`，**不重新加载模块**（ESM 缓存按 URL 命中），
+> 新代码不生效、页面也看不到新字段。要加载新版本，用 `remove_bundle` + `install_bundle`
+> 重装（本次实测会触发重新加载），或者干脆完全退出重启 DSH——最稳。
+>
+> 忘了重启也不用猜：插件会比对自身文件 mtime，发现磁盘已更新但仍在跑旧代码时，
+> `/wb2api/state` 返回 `code.stale=true`，页面顶部直接提示重启。
 ## 配置
 
 装配行在 `cordis.patch.yml`，字段也可以用环境变量覆盖（环境变量优先）：
