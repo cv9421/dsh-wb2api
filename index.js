@@ -11,7 +11,7 @@
  * credit or routing logic, it only reads the panel JSON API and shells the binary.
  */
 import { spawn, execFile } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, readdirSync, realpathSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -381,6 +381,7 @@ export function apply(ctx, config = {}) {
       profileDir: selfProfileDir(),
       apiConfigured: Boolean(apiKey()),
       apiKeySource: apiKeySource(),
+      code: codeFreshness(),
       // 注入状态给 UI 用：失败原因要能在页面上看到，而不是只进 stderr。
       provider: injectState.provider,
       credential: injectState.credential,
@@ -1025,6 +1026,28 @@ export function apply(ctx, config = {}) {
   const PROVIDER_ID = 'wb2api';
   // 本插件的包名：用于从 node_modules 布局反推 profile 目录。
   const PKG_NAME = 'dsh-wb2api-panel';
+
+  // 宿主不会因为文件变化重新加载模块（ESM 按 URL 缓存，HMR 也不盯 node_modules），
+  // 于是"升级了但还在跑旧代码"完全无声。这里记录加载时刻，之后比对磁盘 mtime。
+  const SELF_FILE = fileURLToPath(import.meta.url);
+  const LOAD_STAMP = (() => {
+    try {
+      return statSync(SELF_FILE).mtimeMs;
+    } catch {
+      return 0;
+    }
+  })();
+  function codeFreshness() {
+    try {
+      const disk = statSync(SELF_FILE).mtimeMs;
+      if (LOAD_STAMP > 0 && disk > LOAD_STAMP + 1000) {
+        return { stale: true, diskChangedAt: new Date(disk).toISOString() };
+      }
+      return { stale: false };
+    } catch {
+      return { stale: false };
+    }
+  }
   const PROVIDER_KEY_REF = 'WB2API_API_KEY';
 
   function profilePatchPath() {
