@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+pnpm-lock.yaml
+
+# test/run artifacts (regenerate with `node test/run.mjs`)
+docs/test-run.log
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# local editor state
+.vscode/
+.idea/
+*.swp

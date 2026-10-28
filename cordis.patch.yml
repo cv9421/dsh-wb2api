@@ -1,0 +1,7 @@
+- insert:
+    - id: wb2api-panel
+      name: dsh-wb2api-panel
+      config:
+        baseUrl: http://127.0.0.1:7863
+        apiKey: ''
+        panelDir: 'C:\Users\CinderLumes\Desktop\as\workbuddy2api-panel'
