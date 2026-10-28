@@ -47,8 +47,15 @@ export function apply(ctx, config = {}) {
   // 别人装到没有面板目录的机器上时，这里返回空 —— 插件退化成「只读远程网关」，
   // 不再拿着一个不存在的路径去读 key、拉进程。
   const HERE = path.dirname(fileURLToPath(import.meta.url));
+  // 面板目录发现：先查固定候选，再做一次有界搜索。
+  // 只查固定候选是不够的——面板放在任何自定义目录都会落空，
+  // 而落空的后果是「读不到 api_key + 起不了网关 + 注入不了 provider」，整条链路断掉。
+  let panelDirCache;
   function discoverPanelDir() {
+    if (panelDirCache !== undefined) return panelDirCache;
     const exeName = cfg.exe || DEFAULTS.exe;
+    const isPanel = (dir) => existsSync(path.join(dir, exeName)) || existsSync(path.join(dir, 'config.json'));
+
     const candidates = [
       process.env.WB2API_PANEL_DIR,
       cfg.panelDir,
@@ -56,7 +63,6 @@ export function apply(ctx, config = {}) {
       path.resolve(process.cwd(), 'workbuddy2api-panel'),
       path.join(os.homedir(), 'Desktop', 'workbuddy2api-panel'),
       path.join(os.homedir(), 'workbuddy2api-panel'),
-      // 别人最常见的落点：把网关解压到这几个目录之一，或在 .dsh 下。
       path.join(os.homedir(), '.dsh', 'wb2api'),
       path.join(os.homedir(), '.wb2api'),
       process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'wb2api') : '',
@@ -64,8 +70,49 @@ export function apply(ctx, config = {}) {
     for (const candidate of candidates) {
       if (!candidate) continue;
       const dir = path.resolve(String(candidate));
-      if (existsSync(path.join(dir, exeName)) || existsSync(path.join(dir, 'config.json'))) return dir;
+      if (isPanel(dir)) {
+        panelDirCache = dir;
+        return dir;
+      }
     }
+
+    // 有界搜索：在常见根目录下按目录名找 wb2api.exe（深度受限、跳过 node_modules 等）。
+    const roots = [
+      path.join(os.homedir(), 'Desktop'),
+      path.join(os.homedir(), 'Documents'),
+      path.join(os.homedir(), 'Downloads'),
+      os.homedir(),
+    ].filter(Boolean);
+    const SKIP = new Set(['node_modules', '.git', 'AppData', 'Windows', 'Program Files', 'Program Files (x86)', '$Recycle.Bin', 'System Volume Information']);
+    const MAX_DEPTH = 3;
+    const walk = (dir, depth) => {
+      if (depth > MAX_DEPTH) return '';
+      let entries = [];
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return '';
+      }
+      // 同一层先看目录自身，再看子目录：先命中「最近」的那个。
+      if (isPanel(dir) && existsSync(path.join(dir, exeName))) return dir;
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (SKIP.has(entry.name)) continue;
+        if (entry.name.startsWith('.')) continue;
+        const found = walk(path.join(dir, entry.name), depth + 1);
+        if (found) return found;
+      }
+      return '';
+    };
+    for (const root of roots) {
+      if (!existsSync(root)) continue;
+      const found = walk(root, 0);
+      if (found) {
+        panelDirCache = found;
+        return found;
+      }
+    }
+    // 空结果不缓存：用户事后才把网关放上去时，不必重启就能被找到。
     return '';
   }
   const panelDir = () => (cfg.panelDir && existsSync(path.resolve(String(cfg.panelDir))) ? path.resolve(String(cfg.panelDir)) : discoverPanelDir());
@@ -73,6 +120,26 @@ export function apply(ctx, config = {}) {
 
   /** api_key: explicit config wins, otherwise read the gateway's own config.json. */
   /** key 从哪来的：排查 401 时唯一有用的一条信息。 */
+  /**
+   * key 解析（异步）：配置 -> 面板 config.json -> 凭据库 WB2API_API_KEY。
+   * 凭据库这条很关键：插件自己把 key 写进过 WB2API_API_KEY，换台机器/丢了配置时
+   * 只要凭据还在就该能用，而不是又变成一堆 401。
+   */
+  async function resolveApiKey() {
+    const direct = apiKey();
+    if (direct) return direct;
+    const store = ctx.get('credentials');
+    if (store && typeof store.resolve === 'function') {
+      try {
+        const resolved = await store.resolve(PROVIDER_KEY_REF);
+        if (resolved && resolved.value) return String(resolved.value);
+      } catch {
+        /* 凭据库不可用就继续降级 */
+      }
+    }
+    return ''
+  }
+
   const apiKeySource = () => {
     if (cfg.apiKey) return 'config';
     const file = panelDir() && path.join(panelDir(), 'config.json');
@@ -110,7 +177,7 @@ export function apply(ctx, config = {}) {
 
   async function callPanel(pathname, init = {}) {
     const headers = { accept: 'application/json', ...(init.headers || {}) };
-    const key = apiKey();
+    const key = await resolveApiKey();
     if (key) headers.authorization = `Bearer ${key}`;
     if (init.body !== undefined) headers['content-type'] = 'application/json';
     try {
@@ -354,11 +421,37 @@ export function apply(ctx, config = {}) {
   // ------------------------------------------------------------- web surface
 
   const routes = [];
-  const register = (route) => {
+  // webServer 未必在 apply 时可用：直接 return 会让路由永久丢失，
+  // 表现为 /wb2api/* 一路 404，直到某次配置变更重新 apply 才恢复（很难查）。
+  // 所以先入队，再周期重试，直到注册成功。
+  const pendingRoutes = [];
+  const flushRoutes = () => {
+    if (!pendingRoutes.length) return true;
     const webServer = ctx.get('webServer');
-    if (!webServer || typeof webServer.register !== 'function') return;
-    routes.push(webServer.register(route));
+    if (!webServer || typeof webServer.register !== 'function') return false;
+    while (pendingRoutes.length) {
+      const route = pendingRoutes.shift();
+      try {
+        routes.push(webServer.register(route));
+      } catch (error) {
+        console.error('[wb2api-panel] route registration failed:', error);
+      }
+    }
+    return true;
   };
+  const register = (route) => {
+    pendingRoutes.push(route);
+    flushRoutes();
+  };
+
+  // 每 2s 试一次把路由装上；装完就停。插件卸载时由 effect 清掉。
+  const routeTimer = setInterval(() => {
+    if (flushRoutes()) {
+      clearInterval(routeTimer);
+    }
+  }, 2000);
+  if (routeTimer && typeof routeTimer.unref === 'function') routeTimer.unref();
+  ctx.effect(() => () => clearInterval(routeTimer), 'wb2api-panel route timer');
 
   const sendJson = (res, status, payload) => {
     const body = JSON.stringify(payload);
