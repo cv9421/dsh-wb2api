@@ -1,6 +1,6 @@
 # dsh-wb2api-panel
 
-> WorkBuddy2API（[`linguo2625469/workbuddy2api-panel`](https://github.com/linguo2625469/workbuddy2api-panel)）的 DeepSeek Harness 插件：在 Harness 里管理账号池、任务中心、用量与日志，并托管本机网关进程。
+> WorkBuddy2API（[`cv9421/2api`](https://github.com/cv9421/2api)（fork 自 linguo2625469/workbuddy2api-panel））的 DeepSeek Harness 插件：在 Harness 里管理账号池、任务中心、用量与日志，并托管本机网关进程。
 
 Go 网关保持不动、继续当唯一事实源；插件只做外壳——原生面板 + 进程托管 + 13 个 Agent 工具。**不重写后端，不用 iframe**（原面板自带 `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'`，物理屏蔽嵌套）。
 
@@ -43,7 +43,7 @@ pwsh -File scripts/push.ps1
 脚本会临时摘掉 insteadOf、自动探测可用代理、推送后还原全局配置。**前提：Clash Verge 主程序已启动**（`clash-verge-service` 在跑不代表端口在听）。
 ## 别人怎么装（先看这三条前提）
 
-**1）这个插件只是壳，后端要你自己跑。** 仓库里没有 `wb2api` 二进制——它属于上游 Go 项目 [workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)。没跑网关时，插件能装、页面能开，但只有「未连接」。
+**1）这个插件只是壳，后端要你自己跑。** 仓库里没有 `wb2api` 二进制——它属于上游 Go 项目 [cv9421/2api](https://github.com/cv9421/2api)。没跑网关时，插件能装、页面能开，但只有「未连接」。
 
 **2）装完必须改配置，否则全 401。** `cordis.patch.yml` 里的 `panelDir` 是维护者本机路径。三种配法任选：
 
