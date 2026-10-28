@@ -51,11 +51,11 @@ pwsh -File scripts/push.ps1
 2. 插件同级目录 `../workbuddy2api-panel`
 3. 当前工作目录下的 `workbuddy2api-panel`
 4. `~/Desktop/workbuddy2api-panel`、`~/workbuddy2api-panel`、`~/.dsh/wb2api`、`~/.wb2api`、`%LOCALAPPDATA%\wb2api`
+5. 还没命中就做一次**有界搜索**：在 `Desktop` / `Documents` / `Downloads` / 家目录下按目录名找 `wb2api.exe`（深度 ≤ 3，跳过 `node_modules`、`.git`、`AppData`），命中即缓存
 
 命中条件：目录里存在 `wb2api.exe`（或你自定义的 `exe`）或 `config.json`。全部落空时插件退化为**远程只读模式**——面板与工具照常，只有进程托管不可用，页面顶部给黄色提示条，不会静默。
 
-| 你想做什么 | 需要配的字段 |
-|---|---|
+**key 怎么来的**（三级降级，401 时会告诉你卡在哪一级）：`config.apiKey` / `WB2API_KEY` → 面板 `config.json` 的 `api_key` → 凭据库 `WB2API_API_KEY`。`/wb2api/state` 的 `apiKeySource` 会返回 `config` / `config.json` / `credential` / `none`。
 | 只管远程网关（读账号/用量/日志） | `baseUrl` + `apiKey`，**不需要** `panelDir` |
 | 也要启停本机网关进程 | `panelDir` 指到含 `wb2api.exe` 的目录（或放上面某个默认位置） |
 | 不想改 YAML | 设环境变量 `WB2API_BASE_URL` / `WB2API_KEY` / `WB2API_PANEL_DIR`（优先级高于 YAML） |
@@ -69,8 +69,10 @@ pwsh -File scripts/push.ps1
 | 时机 | 动作 |
 |---|---|
 | 装载后 1.2s | 网关没在跑就拉起来（幂等） |
+| 装载瞬间 | 注册 `/wb2api/*` 路由；`webServer` 没就绪就每 2s 重试，不会静默丢路由 |
 | 装载后约 2s，且网关已就绪 | 把 `wb2api` provider 写进 profile，并把 key 写进 `WB2API_API_KEY` 凭据 |
 | 网关尚未就绪 | 轮询等待（最长 24s），之后每 4s 重试，最多 30 次 |
+| 每次取状态 | 比对自身文件 mtime：磁盘变了而内存还是旧代码 → `code.stale=true`，页面红条提示重启 |
 | 卸载插件 | 停掉网关（`stopOnUnload: true`） |
 
 > **已知宿主限制**：DSH 把「插件装载 / 热更新」整体包在 HMR 事务里，此时调用 `configEditor.edit` 必抛 `HMR transactions cannot be nested`，与重试多久无关。插件检测到这种情况会改为**直接改写 profile 的 `cordis.patch.yml`**（幂等、带去重，不会重复追加），Loader 对账后同样生效。这是实测出来的绕行路径。
