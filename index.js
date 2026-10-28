@@ -288,6 +288,8 @@ export function apply(ctx, config = {}) {
       baseUrl: baseUrl(),
       panelDir: panelDir(),
       panelDirExists: Boolean(panelDir()) && existsSync(panelDir()),
+      // 注入兜底要写这个目录：暴露出来才能判断「写不进去」是权限还是路径算错。
+      profileDir: selfProfileDir(),
       apiConfigured: Boolean(apiKey()),
       // 注入状态给 UI 用：失败原因要能在页面上看到，而不是只进 stderr。
       provider: injectState.provider,
@@ -905,6 +907,8 @@ export function apply(ctx, config = {}) {
   // 幂等：已存在 wb2api 段就跳过。可关：config.injectProvider = false。
 
   const PROVIDER_ID = 'wb2api';
+  // 本插件的包名：用于从 node_modules 布局反推 profile 目录。
+  const PKG_NAME = 'dsh-wb2api-panel';
   const PROVIDER_KEY_REF = 'WB2API_API_KEY';
 
   function profilePatchPath() {
@@ -1008,6 +1012,17 @@ export function apply(ctx, config = {}) {
 
   /** 从自身安装位置反推 profile 目录：node_modules/<pkg> 的真实路径与 HERE 比对。 */
   function selfProfileDir() {
+    // 1) 首选：从安装路径直接反推 <profile>/node_modules/<pkg>。
+    //    不依赖 homedir 与环境变量——真实目录安装、junction 安装都成立。
+    //    （上一版只靠扫 ~/.dsh/profiles，从 GitHub 装成真实目录后直接返回空，注入链路整条死掉。）
+    const parent = path.dirname(HERE);
+    if (path.basename(parent).toLowerCase() === 'node_modules') {
+      return path.dirname(parent);
+    }
+    // 2) 环境变量：Host 进程内一般没有，但 shell 里跑测试时有。
+    const fromEnv = String(process.env.DSH_PROFILE_DIR || '').trim();
+    if (fromEnv && existsSync(path.join(fromEnv, 'cordis.patch.yml'))) return fromEnv;
+    // 3) 扫 ~/.dsh/profiles，用真实路径比对（junction 安装时 HERE 指向源码目录）。
     const base = path.join(os.homedir(), '.dsh', 'profiles');
     let names = [];
     try {
@@ -1024,11 +1039,11 @@ export function apply(ctx, config = {}) {
     const candidates = [];
     for (const name of names) {
       const dir = path.join(base, name);
-      const patch = path.join(dir, 'cordis.patch.yml');
-      if (!existsSync(patch)) continue;
+      if (!existsSync(path.join(dir, 'cordis.patch.yml'))) continue;
       candidates.push(dir);
       try {
-        if (realpathSync(path.join(dir, 'node_modules', 'dsh-wb2api-panel')) === selfReal) return dir;
+        const installed = realpathSync(path.join(dir, 'node_modules', PKG_NAME));
+        if (installed === selfReal || installed === HERE) return dir;
       } catch {
         /* 这个 profile 没装本插件 */
       }
