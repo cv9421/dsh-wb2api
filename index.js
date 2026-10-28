@@ -11,8 +11,10 @@
  * credit or routing logic, it only reads the panel JSON API and shells the binary.
  */
 import { spawn, execFile } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 
 export const name = 'wb2api-panel';
@@ -41,7 +43,32 @@ export function apply(ctx, config = {}) {
   const state = { child: null, startedAt: 0 };
 
   const baseUrl = () => String(cfg.baseUrl || DEFAULTS.baseUrl).replace(/\/+$/, '');
-  const panelDir = () => (cfg.panelDir ? path.resolve(String(cfg.panelDir)) : '');
+  // panelDir 解析顺序：显式配置 → WB2API_PANEL_DIR → 常见位置探测。
+  // 别人装到没有面板目录的机器上时，这里返回空 —— 插件退化成「只读远程网关」，
+  // 不再拿着一个不存在的路径去读 key、拉进程。
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+  function discoverPanelDir() {
+    const exeName = cfg.exe || DEFAULTS.exe;
+    const candidates = [
+      process.env.WB2API_PANEL_DIR,
+      cfg.panelDir,
+      path.resolve(HERE, '..', 'workbuddy2api-panel'),
+      path.resolve(process.cwd(), 'workbuddy2api-panel'),
+      path.join(os.homedir(), 'Desktop', 'workbuddy2api-panel'),
+      path.join(os.homedir(), 'workbuddy2api-panel'),
+      // 别人最常见的落点：把网关解压到这几个目录之一，或在 .dsh 下。
+      path.join(os.homedir(), '.dsh', 'wb2api'),
+      path.join(os.homedir(), '.wb2api'),
+      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'wb2api') : '',
+    ];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const dir = path.resolve(String(candidate));
+      if (existsSync(path.join(dir, exeName)) || existsSync(path.join(dir, 'config.json'))) return dir;
+    }
+    return '';
+  }
+  const panelDir = () => (cfg.panelDir && existsSync(path.resolve(String(cfg.panelDir))) ? path.resolve(String(cfg.panelDir)) : discoverPanelDir());
   const exePath = () => (panelDir() ? path.join(panelDir(), cfg.exe || DEFAULTS.exe) : '');
 
   /** api_key: explicit config wins, otherwise read the gateway's own config.json. */
@@ -262,6 +289,10 @@ export function apply(ctx, config = {}) {
       panelDir: panelDir(),
       panelDirExists: Boolean(panelDir()) && existsSync(panelDir()),
       apiConfigured: Boolean(apiKey()),
+      // 注入状态给 UI 用：失败原因要能在页面上看到，而不是只进 stderr。
+      provider: injectState.provider,
+      credential: injectState.credential,
+      injectCheckedAt: injectState.checkedAt || undefined,
       overview: overview.ok ? overview.data : null,
       overviewError: overview.ok ? undefined : overview.error || `HTTP ${overview.status}`,
     };
@@ -881,6 +912,31 @@ export function apply(ctx, config = {}) {
     return dir ? path.join(dir, 'cordis.patch.yml') : '';
   }
 
+  // 注入结果要能被 UI / agent 看见：冷启动时网关可能还没监听，
+  // 单次尝试失败会让用户看到「插件装了但模型列表里没有 wb2api」而无从排查。
+  const injectState = { credential: null, provider: null, checkedAt: 0 };
+
+  /**
+   * 等网关就绪：health 通过 + /v1/models 真的返回了模型。
+   * 冷启动（进程刚拉起 / 首次加载账号池）时 2s 常常不够，所以退避轮询。
+   * 等待期间不抛错，超时返回 [] 让调用方降级。
+   */
+  async function waitForGatewayReady(timeoutMs = 24000, intervalMs = 2000) {
+    const deadline = Date.now() + timeoutMs;
+    let lastReason = 'gateway not reachable';
+    for (;;) {
+      const probe = await health();
+      if (probe.running) {
+        const models = await fetchProviderModels();
+        if (models.length) return { models, waited: timeoutMs - (deadline - Date.now()) };
+        lastReason = 'gateway reachable but advertised no models';
+      } else {
+        lastReason = 'gateway not listening on ' + baseUrl();
+      }
+      if (Date.now() >= deadline) return { models: [], reason: lastReason };
+      await sleep(intervalMs);
+    }
+  }
   /** 从网关 /v1/models 取模型目录，转成 llm-pi-ai 的 models[] 形状。 */
   async function fetchProviderModels() {
     const res = await callPanel('/v1/models', { timeoutMs: 30000 });
@@ -911,28 +967,222 @@ export function apply(ctx, config = {}) {
     });
   }
 
-  function yamlProviderBlock(models) {
+  function yamlProviderBlock(models, base = 6) {
+    // 缩进必须由调用方给定（由文件里 providers: 的实际层级推算），写死会套错层级。
+    const pad = (n) => ' '.repeat(n);
+    const key = pad(base);
+    const field = pad(base + 2);
+    const item = pad(base + 4);
+    const deep = pad(base + 6);
     const lines = [
-      `      ${PROVIDER_ID}:`,
-      `        displayName: WorkBuddy 网关`,
-      `        api: openai-completions`,
-      `        baseURL: ${baseUrl()}/v1`,
-      `        apiKeyEnv: ${PROVIDER_KEY_REF}`,
-      `        defaultInput:`,
-      `          - text`,
-      `          - image`,
-      `        compat:`,
-      `          supportsReasoningEffort: true`,
-      `        models:`,
+      `${key}${PROVIDER_ID}:`,
+      `${field}displayName: WorkBuddy 网关`,
+      `${field}api: openai-completions`,
+      `${field}baseURL: ${baseUrl()}/v1`,
+      `${field}apiKeyEnv: ${PROVIDER_KEY_REF}`,
+      `${field}defaultInput:`,
+      `${item}- text`,
+      `${item}- image`,
+      `${field}compat:`,
+      `${item}supportsReasoningEffort: true`,
+      `${field}models:`,
     ];
     for (const model of models) {
-      lines.push(`          - id: ${JSON.stringify(model.id)}`);
-      if (model.name) lines.push(`            name: ${JSON.stringify(model.name)}`);
-      if (model.contextWindow) lines.push(`            contextWindow: ${model.contextWindow}`);
-      if (model.maxTokens) lines.push(`            maxTokens: ${model.maxTokens}`);
-      lines.push(`            input: [text, image]`);
+      lines.push(`${item}- id: ${JSON.stringify(model.id)}`);
+      if (model.name) lines.push(`${deep}name: ${JSON.stringify(model.name)}`);
+      if (model.contextWindow) lines.push(`${deep}contextWindow: ${model.contextWindow}`);
+      if (model.maxTokens) lines.push(`${deep}maxTokens: ${model.maxTokens}`);
+      lines.push(`${deep}input: [text, image]`);
+      // 档位必须一起写：漏了它模型选择器就只剩「默认」，等于把 low/high/max 吞掉。
+      if (model.reasoningEfforts === false) {
+        lines.push(`${deep}reasoningEfforts: false`);
+      } else if (model.reasoningEfforts && typeof model.reasoningEfforts === 'object') {
+        lines.push(`${deep}reasoningEfforts:`);
+        for (const [effort, label] of Object.entries(model.reasoningEfforts)) {
+          lines.push(`${deep}  ${effort}: ${label}`);
+        }
+      }
     }
     return lines.join('\n');
+  }
+
+  /** 从自身安装位置反推 profile 目录：node_modules/<pkg> 的真实路径与 HERE 比对。 */
+  function selfProfileDir() {
+    const base = path.join(os.homedir(), '.dsh', 'profiles');
+    let names = [];
+    try {
+      names = readdirSync(base);
+    } catch {
+      return '';
+    }
+    let selfReal = HERE;
+    try {
+      selfReal = realpathSync(HERE);
+    } catch {
+      /* 保持原值 */
+    }
+    const candidates = [];
+    for (const name of names) {
+      const dir = path.join(base, name);
+      const patch = path.join(dir, 'cordis.patch.yml');
+      if (!existsSync(patch)) continue;
+      candidates.push(dir);
+      try {
+        if (realpathSync(path.join(dir, 'node_modules', 'dsh-wb2api-panel')) === selfReal) return dir;
+      } catch {
+        /* 这个 profile 没装本插件 */
+      }
+    }
+    // 退化：只有一个 profile 时直接用它（单 profile 安装的常见情形）。
+    return candidates.length === 1 ? candidates[0] : '';
+  }
+
+  /**
+   * 直接改写 profile patch 里的 providers.wb2api 段。
+   *
+   * 为什么需要它：宿主把「插件装载 / 热更新」整体包在 HMR 事务里，
+   * 从插件 fiber 里调用 configEditor.edit 必然抛 "HMR transactions cannot be nested"，
+   * 与重试多久无关。文件层写入绕开这条限制，Loader 对账后同样生效，
+   * 且下次冷启动一定带上这段配置。
+   */
+  function readPatchFileProvider() {
+    const dir = selfProfileDir();
+    if (!dir) return { found: false, reason: 'profile directory not found' };
+    const file = path.join(dir, 'cordis.patch.yml');
+    let rows = [];
+    try {
+      rows = readFileSync(file, 'utf8').replace(/\r\n/g, '\n').split('\n');
+    } catch (error) {
+      return { found: false, reason: 'read failed: ' + String((error && error.message) || error) };
+    }
+    const rowStart = rows.findIndex((line) => /^- id: llm-pi-ai\s*$/.test(line));
+    if (rowStart < 0) return { found: false, file };
+    let rowEnd = rows.length;
+    for (let i = rowStart + 1; i < rows.length; i += 1) {
+      if (/^\S/.test(rows[i]) && rows[i].trim()) {
+        rowEnd = i;
+        break;
+      }
+    }
+    let providerAt = -1;
+    for (let i = rowStart; i < rowEnd; i += 1) {
+      if (/^\s+wb2api:\s*$/.test(rows[i])) {
+        providerAt = i;
+        break;
+      }
+    }
+    if (providerAt < 0) return { found: false, file };
+    const indent = rows[providerAt].length - rows[providerAt].trimStart().length;
+    let count = 0;
+    for (let i = providerAt + 1; i < rowEnd; i += 1) {
+      const trimmed = rows[i].trim();
+      if (!trimmed) continue;
+      const childIndent = rows[i].length - rows[i].trimStart().length;
+      if (childIndent <= indent) break;
+      if (/^-\s+id:/.test(trimmed)) count += 1;
+    }
+    return { found: true, file, count };
+  }
+
+  function upsertProviderBlock(models) {
+    const dir = selfProfileDir();
+    if (!dir) return { ok: false, reason: 'profile directory not found' };
+    const file = path.join(dir, 'cordis.patch.yml');
+    let text = '';
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch (error) {
+      return { ok: false, reason: 'read failed: ' + String((error && error.message) || error) };
+    }
+    const rows = text.replace(/\r\n/g, '\n').split('\n');
+    const rowStart = rows.findIndex((line) => /^- id: llm-pi-ai\s*$/.test(line));
+    if (rowStart < 0) return { ok: false, reason: 'llm-pi-ai row not found in ' + file };
+    let rowEnd = rows.length;
+    for (let i = rowStart + 1; i < rows.length; i += 1) {
+      if (/^\S/.test(rows[i]) && rows[i].trim()) {
+        rowEnd = i;
+        break;
+      }
+    }
+    // yamlProviderBlock 产出的 wb2api 段是 6 空格基准；挂到 providers: 之下必须再缩 2 格，
+    // 否则 wb2api 会变成 providers 的同级键，配置直接失效（providers 变成 null）。
+    // 缩进一律从文件里算：profile 的 config: 在 2 格、providers: 在 4 格、提供商键在 6 格。
+    // 写死任一层级都会把 wb2api 套到错误的父键下（表现为 providers 里多了个 providers）。
+    const indentOf = (index) => rows[index].length - rows[index].trimStart().length;
+
+    let providersAt = -1;
+    for (let i = rowStart; i < rowEnd; i += 1) {
+      if (/^\s*providers:\s*$/.test(rows[i])) {
+        providersAt = i;
+        break;
+      }
+    }
+
+    if (providersAt < 0) {
+      let configIndent = 2;
+      for (let i = rowStart; i < rowEnd; i += 1) {
+        if (/^\s*config:\s*$/.test(rows[i])) {
+          configIndent = indentOf(i);
+          break;
+        }
+      }
+      const providersIndent = configIndent + 2;
+      const created = [
+        ...rows.slice(0, rowEnd),
+        ' '.repeat(providersIndent) + 'providers:',
+        ...yamlProviderBlock(models, providersIndent + 2).split('\n'),
+        ...rows.slice(rowEnd),
+      ];
+      try {
+        writeFileSync(file, created.join('\r\n'), 'utf8');
+      } catch (error) {
+        return { ok: false, reason: 'write failed: ' + String((error && error.message) || error) };
+      }
+      return { ok: true, file, models: models.length, created: true };
+    }
+
+    const blockLines = yamlProviderBlock(models, indentOf(providersAt) + 2).split('\n');
+
+    // 收集 providers 之下所有 wb2api 段：缩进无关，重复段必须能识别并清掉，
+    // 否则「写文件 → 对账 → 重载 → 再写」会自我循环，段越写越多。
+    const spans = [];
+    for (let i = providersAt + 1; i < rowEnd; i += 1) {
+      const match = /^(\s+)wb2api:\s*$/.exec(rows[i]);
+      if (!match) continue;
+      const indent = match[1].length;
+      let end = rowEnd;
+      for (let j = i + 1; j < rowEnd; j += 1) {
+        const trimmed = rows[j].trim();
+        if (!trimmed) continue;
+        const childIndent = rows[j].length - rows[j].trimStart().length;
+        if (childIndent <= indent) {
+          end = j;
+          break;
+        }
+      }
+      spans.push({ start: i, end });
+      i = end - 1;
+    }
+
+    if (spans.length === 1) {
+      const current = rows.slice(spans[0].start, spans[0].end).join('\n');
+      if (current === blockLines.join('\n')) {
+        return { ok: true, already: true, file, models: models.length };
+      }
+    }
+
+    let working = rows.slice();
+    for (let k = spans.length - 1; k >= 0; k -= 1) {
+      working = [...working.slice(0, spans[k].start), ...working.slice(spans[k].end)];
+    }
+    const insertAt = providersAt + 1;
+    const next = [...working.slice(0, insertAt), ...blockLines, ...working.slice(insertAt)];
+    try {
+      writeFileSync(file, next.join('\r\n'), 'utf8');
+    } catch (error) {
+      return { ok: false, reason: 'write failed: ' + String((error && error.message) || error) };
+    }
+    return { ok: true, file, models: models.length, replaced: spans.length };
   }
 
   /** 找到 llm-pi-ai 的 profile 行（configEditor 是官方入口，不依赖环境变量/文件路径）。 */
@@ -956,13 +1206,33 @@ export function apply(ctx, config = {}) {
     return { ...raw };
   }
 
+  function remember(kind, result) {
+    injectState[kind] = result;
+    injectState.checkedAt = Date.now();
+    return result;
+  }
+
   async function ensureProvider() {
+    return remember('provider', await ensureProviderInner());
+  }
+
+  async function ensureProviderInner() {
     const editor = ctx.get('configEditor');
     if (!editor || typeof editor.edit !== 'function') {
       return { ok: false, reason: 'configEditor service unavailable' };
     }
     const entry = findLlmEntry(editor);
-    if (!entry) return { ok: false, reason: 'llm-pi-ai row not found in profile' };
+    if (!entry) {
+      return {
+        ok: false,
+        code: 'LLM_PI_AI_MISSING',
+        reason:
+          'profile 里没有 llm-pi-ai 行，无法注册模型提供商。' +
+          '请在 Harness「插件」页启用 llm-pi-ai（它自带 openai-completions 适配器），' +
+          '或在 profile 的 cordis.patch.yml 里加 include:llm-pi-ai 后重载插件。' +
+          '网关本体不受影响，面板与工具仍可用。',
+      };
+    }
 
     const withProviders = (base) => (base && typeof base.providers === 'object' && base.providers) || {};
     const existing = withProviders(currentEntryConfig(editor, entry))[PROVIDER_ID];
@@ -972,8 +1242,19 @@ export function apply(ctx, config = {}) {
       if (!stale) return { ok: true, already: true, entryId: entry.id };
     }
 
-    const models = await fetchProviderModels();
-    if (!models.length) return { ok: false, reason: 'gateway advertised no models' };
+    // 先等网关就绪再取模型：冷启动竞态下这是「装了但没模型」的主因。
+    const ready = await waitForGatewayReady();
+    const models = ready.models;
+    if (!models.length) {
+      return { ok: false, reason: 'gateway not ready: ' + (ready.reason || 'unknown') };
+    }
+
+    // 文件层短路：写 profile patch 会触发宿主对账 → 插件重载 → 再次进入这里，
+    // 少了这一步就会自我循环、把段越写越多。文件里已有同样规模的段就直接认账。
+    const onDisk = readPatchFileProvider();
+    if (onDisk.found && onDisk.count === models.length) {
+      return { ok: true, already: true, viaFile: true, file: onDisk.file, injected: onDisk.count };
+    }
 
     const profile = {
       displayName: 'WorkBuddy 网关',
@@ -985,14 +1266,43 @@ export function apply(ctx, config = {}) {
       models,
     };
 
-    try {
-      await editor.edit(entry, (current, inherited) => {
-        const merged = { ...(inherited || {}), ...(current || {}) };
-        const providers = { ...withProviders(merged), [PROVIDER_ID]: profile };
-        return { ...(current || {}), providers };
-      });
-    } catch (error) {
-      return { ok: false, reason: 'edit failed: ' + String((error && error.message) || error) };
+    // configEditor.edit 在 HMR 事务里会抛 "HMR transactions cannot be nested"：
+    // 插件刚热更新完那一下正好落在事务窗口内。这不是配置错误，等一拍重试即可。
+    let lastError = null;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        await editor.edit(entry, (current, inherited) => {
+          const merged = { ...(inherited || {}), ...(current || {}) };
+          const providers = { ...withProviders(merged), [PROVIDER_ID]: profile };
+          return { ...(current || {}), providers };
+        });
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        const message = String((error && error.message) || error);
+        if (!/HMR/i.test(message)) break;
+        await sleep(1500);
+      }
+    }
+    if (lastError) {
+      const message = String((lastError && lastError.message) || lastError);
+      // HMR 事务限制：configEditor 不可用时改走文件层，别把自动配置整条断掉。
+      if (/HMR transactions/.test(message)) {
+        const viaFile = upsertProviderBlock(models);
+        if (viaFile.ok) {
+          return {
+            ok: true,
+            injected: models.length,
+            viaFile: true,
+            file: viaFile.file,
+            entryId: entry.id,
+            note: 'configEditor 被 HMR 事务挡住，已直接写入 profile patch（Loader 对账后生效）',
+          };
+        }
+        return { ok: false, reason: message + ' / file fallback failed: ' + viaFile.reason };
+      }
+      return { ok: false, reason: 'edit failed: ' + message };
     }
 
     const after = findLlmEntry(ctx.get('configEditor'));
@@ -1002,6 +1312,10 @@ export function apply(ctx, config = {}) {
 
   /** key 写进凭据库：apiKeyEnv 解析时优先于环境变量，配置文件里不落明文。 */
   async function ensureProviderCredential() {
+    return remember('credential', await ensureProviderCredentialInner());
+  }
+
+  async function ensureProviderCredentialInner() {
     const store = ctx.get('credentials');
     const key = apiKey();
     if (!store || typeof store.set !== 'function' || !key) {
@@ -1033,24 +1347,61 @@ export function apply(ctx, config = {}) {
   // 注意：只覆盖「正常装载/卸载」。Harness 被强杀时 Node 不会执行 dispose，
   // 网关会变成孤儿进程——这一点靠插件无法兜住，需要宿主侧的父进程监护。
   if (cfg.injectProvider !== false) {
-    const timer2 = setTimeout(async () => {
+    // 宿主把「插件装载/热更新」整体包在 HMR 事务里，此时调用 configEditor.edit
+    // 会抛 "HMR transactions cannot be nested"。工具调用不受影响（不同 fiber），
+    // 所以自动注入必须换时机：等事务收尾（事件）并持续重试直到成功。
+    let injectTries = 0;
+    let injectDone = false;
+
+    const attemptInject = async (why) => {
+      if (injectDone) return;
+      injectTries += 1;
       try {
-        const cred = await ensureProviderCredential();
-        const injected = await ensureProvider();
-        if (!injected.ok && !injected.already) {
-          console.error('[wb2api-panel] provider injection skipped:', injected.reason);
-        }
-        if (!cred.ok && !cred.already) {
-          console.error('[wb2api-panel] credential not stored:', cred.reason);
+        await ensureProviderCredential();
+        const result = await ensureProvider();
+        injectState.tries = injectTries;
+        injectState.lastWhy = why;
+        if (result.ok) {
+          injectDone = true;
+          console.error('[wb2api-panel] provider ready via ' + why + ' (try ' + injectTries + ')');
+        } else if (!/HMR transactions/.test(String(result.reason || ''))) {
+          // 非事务类失败（真配置错误 / 网关没模型）先记下，重试仍会继续兜底。
+          console.error('[wb2api-panel] provider injection failed via ' + why + ': ' + result.reason);
         }
       } catch (error) {
         console.error('[wb2api-panel] provider injection error:', error);
       }
-    }, 2200);
+    };
+
+    const timer2 = setTimeout(() => attemptInject('initial'), 2200);
     if (timer2 && typeof timer2.unref === 'function') timer2.unref();
     ctx.effect(() => () => clearTimeout(timer2), 'wb2api-panel provider timer');
-  }
-  if (cfg.autoStart !== false) {
+
+    // 事务收尾信号：这两个事件都在 Loader 对账/模块替换完成之后才发。
+    const onReload = () => {
+      const timer = setTimeout(() => attemptInject('reload-event'), 600);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    };
+    for (const eventName of ['app-boot/config-reload', 'hmr/reload']) {
+      try {
+        ctx.on(eventName, onReload);
+      } catch {
+        /* 事件不可用时靠下面的轮询兜底 */
+      }
+    }
+
+    // 轮询兜底：每 4s 试一次，最多 30 次（约 2 分钟）。
+    // 期间若注入成功就自我停止；插件卸载时由 effect 清掉。
+    const retryTimer = setInterval(() => {
+      if (injectDone || injectTries >= 30) {
+        clearInterval(retryTimer);
+        return;
+      }
+      attemptInject('retry');
+    }, 4000);
+    if (retryTimer && typeof retryTimer.unref === 'function') retryTimer.unref();
+    ctx.effect(() => () => clearInterval(retryTimer), 'wb2api-panel provider retry loop');
+  }  if (cfg.autoStart !== false) {
     const timer = setTimeout(async () => {
       try {
         const probe = await health();

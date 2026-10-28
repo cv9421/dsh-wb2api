@@ -45,17 +45,35 @@ pwsh -File scripts/push.ps1
 
 **1）这个插件只是壳，后端要你自己跑。** 仓库里没有 `wb2api` 二进制——它属于上游 Go 项目 [cv9421/2api](https://github.com/cv9421/2api)。没跑网关时，插件能装、页面能开，但只有「未连接」。
 
-**2）装完必须改配置，否则全 401。** `cordis.patch.yml` 里的 `panelDir` 是维护者本机路径。三种配法任选：
+**2）`panelDir` 会自动发现，不必再手改维护者路径。** 解析顺序：
+
+1. config `panelDir`，或环境变量 `WB2API_PANEL_DIR`
+2. 插件同级目录 `../workbuddy2api-panel`
+3. 当前工作目录下的 `workbuddy2api-panel`
+4. `~/Desktop/workbuddy2api-panel`、`~/workbuddy2api-panel`、`~/.dsh/wb2api`、`~/.wb2api`、`%LOCALAPPDATA%\wb2api`
+
+命中条件：目录里存在 `wb2api.exe`（或你自定义的 `exe`）或 `config.json`。全部落空时插件退化为**远程只读模式**——面板与工具照常，只有进程托管不可用，页面顶部给黄色提示条，不会静默。
 
 | 你想做什么 | 需要配的字段 |
 |---|---|
 | 只管远程网关（读账号/用量/日志） | `baseUrl` + `apiKey`，**不需要** `panelDir` |
-| 也要启停本机网关进程 | 再加 `panelDir`（面板目录，含 `wb2api.exe`） |
+| 也要启停本机网关进程 | `panelDir` 指到含 `wb2api.exe` 的目录（或放上面某个默认位置） |
 | 不想改 YAML | 设环境变量 `WB2API_BASE_URL` / `WB2API_KEY` / `WB2API_PANEL_DIR`（优先级高于 YAML） |
 
-没配 `panelDir` 时，页面顶部会出现黄色提示条：只读模式，进程托管不可用——不会静默给你一堆 401。
+**3）要模型提供商自动注册，profile 里必须有 `llm-pi-ai`。** 插件复用它的 `openai-completions` 适配器，不自己写 adapter。缺失时不会静默：页面顶栏显示「缺少 llm-pi-ai」，`wb2api_provider status` 也会给出 `code: LLM_PI_AI_MISSING`。
 
-**3）进程托管是 Windows 优先。** 启停用 `taskkill` + `data/server.pid`；Linux/macOS 走 `process.kill` 分支但未在那边验证过。
+**4）进程托管是 Windows 优先。** 启停用 `taskkill` + `data/server.pid`；Linux/macOS 走 `process.kill` 分支但未在那边验证过。
+
+### 装好后自动完成的事
+
+| 时机 | 动作 |
+|---|---|
+| 装载后 1.2s | 网关没在跑就拉起来（幂等） |
+| 装载后约 2s，且网关已就绪 | 把 `wb2api` provider 写进 profile，并把 key 写进 `WB2API_API_KEY` 凭据 |
+| 网关尚未就绪 | 轮询等待（最长 24s），之后每 4s 重试，最多 30 次 |
+| 卸载插件 | 停掉网关（`stopOnUnload: true`） |
+
+> **已知宿主限制**：DSH 把「插件装载 / 热更新」整体包在 HMR 事务里，此时调用 `configEditor.edit` 必抛 `HMR transactions cannot be nested`，与重试多久无关。插件检测到这种情况会改为**直接改写 profile 的 `cordis.patch.yml`**（幂等、带去重，不会重复追加），Loader 对账后同样生效。这是实测出来的绕行路径。
 
 ### 装法
 
@@ -82,10 +100,10 @@ plugin_manager set_plugin  target=include:wb2api-panel enabled=true
 |---|---|---|---|
 | `baseUrl` | `WB2API_BASE_URL` | `http://127.0.0.1:7863` | 网关地址，可指向远程实例 |
 | `apiKey` | `WB2API_KEY` | 空 | 留空则自动读 `panelDir/config.json` 的 `api_key` |
-| `panelDir` | `WB2API_PANEL_DIR` | 空 | 面板目录：读配置、拉进程、看日志。**本机路径，克隆后请改成自己的** |
+| `panelDir` | `WB2API_PANEL_DIR` | 空（自动发现） | 面板目录：读配置、拉进程、看日志。留空时按上面的顺序探测 |
 | `exe` | `WB2API_EXE` | `wb2api.exe` | 二进制文件名 |
 
-> 仓库里的 `panelDir` 是维护者本机路径，仅作示例；克隆后请改成你自己的面板目录，或设置 `WB2API_PANEL_DIR`。
+> 留空即可。只有自动发现全落空（比如你把网关放在别处）时才需要显式指定 `panelDir`。
 
 ## 架构
 

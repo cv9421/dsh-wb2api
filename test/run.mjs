@@ -531,7 +531,7 @@ async function sectionHost(host) {
     return route.path;
   });
 
-  await check('host', 'registers 13 tools with valid model-facing schemas', () => {
+  await check('host', 'registers 14 tools with valid model-facing schemas', () => {
     const names = host.captured.tools.map((tool) => tool.name).sort();
     const expected = [
       'wb2api_accounts',
@@ -542,6 +542,7 @@ async function sectionHost(host) {
       'wb2api_login',
       'wb2api_logs',
       'wb2api_models',
+      'wb2api_provider',
       'wb2api_security',
       'wb2api_service',
       'wb2api_status',

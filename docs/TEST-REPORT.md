@@ -74,9 +74,9 @@ L5 线上链路        装进 profile 的实例，经 Harness web server 访问
 | `wb2api_usage` 返回 totals | PASS | requests=0 |
 | `wb2api_logs` 返回日志条目 | PASS | 216 条 |
 | `wb2api_config` 正确解包 `{config}` 信封 | PASS | `listen=127.0.0.1:7863` |
-| 版本门控工具降级为 404 而非抛错 | PASS | clientkeys=404 security=404 |
-| 模型准入：支持则往返，不支持则明确自报 | PASS | `gate absent on this binary (reported, not silent)` |
-| `wb2api_service` 探活 | PASS | healthy=3 total=4 |
+| 版本门控工具在当前二进制上可用 | PASS | clientkeys=200 security=200 |
+| 模型准入：支持则往返，不支持则明确自报 | PASS | `cn:hy4-preview` 往返切换并已还原 |
+| `wb2api_service` 探活 | PASS | healthy=1 total=5 |
 
 ### L4 · 代理路由（6）
 
@@ -115,14 +115,14 @@ L5 线上链路        装进 profile 的实例，经 Harness web server 访问
 $ node -e "...regex /panel/api/[A-Za-z0-9_./{}-]* over wb2api.exe..."
 ```
 
-| 端点 | 源码 checkout | 运行中的 v1.11.11 | 插件行为 |
+| 端点 | 源码 checkout | 当前二进制 v1.13.0-panel | 插件行为 |
 |---|---|---|---|
-| `models/toggle` | 有 | **无** | 报 `gateSupported:false`，不假装成功 |
-| `clientkeys` | 有 | **无** | 工具返回 404 + 说明 |
-| `security` | 有 | **无** | 同上 |
-| `apimonitor` | 有 | **无** | 未接入（无工具/UI） |
+| `models/toggle` | 有 | **有** | 正常往返（`cn:hy4-preview` 实测） |
+| `clientkeys` | 有 | **有** | 工具返回 200 + 数据 |
+| `security` | 有 | **有** | 工具返回 200 + 数据 |
+| `apimonitor` | 有 | 有 | 未接入（无工具/UI） |
 
-结论：**这不是插件 bug，是二进制落后于源码 checkout**。升级 `wb2api.exe` 后这四处自动可用，插件无需改动。
+结论：二进制已升级到 `1.13.0-panel+modelswitch+hidettitle+dirtycfg+secmon`，上述门控全部可用；仍保留能力探测，换回旧二进制时工具会明确自报「本二进制不支持」而不是假装成功。
 
 ## 5. 覆盖度
 
@@ -150,3 +150,30 @@ node test/run.mjs            # 43 用例，退出码即结论
 ```
 
 可用环境变量指向别的实例：`WB2API_TEST_BASE`（Harness origin）、`WB2API_TEST_PANEL`（网关 origin）。
+
+## 8. 安装自动化验证（干净安装模拟）
+
+目标：让第三方在**不改任何 YAML** 的前提下装完即用。把 profile 里已注入的 `wb2api` 段与
+`WB2API_API_KEY` 凭据全部删掉、停掉网关，再走一次真实的卸载/装载，观察插件能否自动补齐。
+
+| 环节 | 期望 | 实测结果 |
+|---|---|---|
+| `panelDir` 自动发现 | 删掉显式配置也能找到面板目录 | PASS：`C:\Users\CinderLumes\Desktop\as\workbuddy2api-panel`（经真实路径回溯命中） |
+| 网关自动拉起 | 停掉后装载即恢复监听 | PASS：`service.running=true`，`uptime_sec` 重新计时 |
+| 凭据自动写入 | 删除后自动写回 `WB2API_API_KEY` | PASS：`credential.ok=true, stored=true` |
+| provider 自动注册 | profile 长出 `wb2api` 段 | PASS：21 个模型，19 个带 `reasoningEfforts` |
+| 网关未就绪时 | 等待而不是放弃 | PASS：`waitForGatewayReady()` 轮询最长 24s |
+| 自激保护 | 写文件不得触发无限重写 | PASS：连跑 30s 后仍为**单段**、行数稳定 262 |
+
+### 本轮发现并修复的缺陷
+
+| # | 缺陷 | 严重度 | 证据 | 修复 |
+|---|---|---|---|---|
+| 4 | `panelDir` 写死维护者路径，别人装完读不到 key、也起不了进程 | 高（安装即失败） | 硬编码 `C:\Users\CinderLumes\Desktop\as\workbuddy2api-panel` | 多候选自动发现；全落空时明确降级为远程只读模式 |
+| 5 | 注入只在装载后 2.2s 单次尝试，冷启动竞态下直接失败 | 高 | 冷启动时 `/v1/models` 尚未就绪 | `waitForGatewayReady()` 轮询 + 4s×30 次兜底重试 |
+| 6 | `llm-pi-ai` 缺失时只写 stderr，用户看不到 | 中 | 日志里有、页面上没有 | 返回 `code: LLM_PI_AI_MISSING`，页顶显示提示条 |
+| 7 | 宿主 HMR 事务内调用 `configEditor.edit` 必抛 `HMR transactions cannot be nested` | 高（自动注入整条失效） | 连续 10+ 次重试同一错误；工具调用却成功（不同 fiber） | 改为直接改写 profile `cordis.patch.yml`，幂等 + 去重 |
+| 8 | 文件层写入触发「对账 → 重载 → 再写」自激循环 | 高（会写坏配置） | profile patch 从 81 行涨到 **1349 行**、重复 7 段 | `readPatchFileProvider()` 短路：文件里已有同规模段即认账 |
+| 9 | 生成 YAML 时缩进写死 6 空格，而实际 `providers:` 在 4 空格 | 高（配置语义错误） | PyYAML 解析出 `providers keys: ['k','providers']`（套出了嵌套键） | 缩进由文件实际层级推算（`indentOf(providersAt) + 2`） |
+
+修完后用 PyYAML 复核结构：`providers keys: ['wb2api','k']`、`models: 21`、`with reasoningEfforts: 19`。

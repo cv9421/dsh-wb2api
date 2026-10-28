@@ -77,6 +77,8 @@ window.__ModuleLoader__.load({
       baseUrl: '地址',
       noKey: '未读到 api_key',
       noPanelDir: '未配置面板目录：只能看数据，无法托管进程（请在 cordis.patch.yml 设 panelDir 或设 WB2API_PANEL_DIR）',
+  providerBroken: '模型提供商未注册',
+  providerNoAdapter: '缺少 llm-pi-ai',
       loginRealm: '登录区服',
       loginCn: '国内版（cn）',
       loginGlobal: '国际版（global）',
@@ -189,6 +191,8 @@ window.__ModuleLoader__.load({
       baseUrl: 'Base URL',
       noKey: 'api_key not found',
       noPanelDir: 'No panel directory: read-only. Set panelDir in cordis.patch.yml or WB2API_PANEL_DIR.',
+  providerBroken: 'Model provider not registered',
+  providerNoAdapter: 'llm-pi-ai missing',
       loginRealm: 'Realm',
       loginCn: 'China (cn)',
       loginGlobal: 'Global (global)',
@@ -1303,6 +1307,13 @@ window.__ModuleLoader__.load({
       ];
       const active = tabs.find((entry) => entry[0] === tab) || tabs[0];
 
+      // 注入失败必须出现在页面上：否则用户只看到「装了插件但模型列表没有 wb2api」。
+      const prov = snap && snap.provider;
+      const providerWarning =
+        prov && prov.ok === false
+          ? (prov.code === 'LLM_PI_AI_MISSING' ? T('providerNoAdapter') : T('providerBroken')) + ': ' + (prov.reason || '')
+          : null;
+
       return h(
         'div',
         { className: 'wb2p-root' },
@@ -1322,6 +1333,7 @@ window.__ModuleLoader__.load({
         ),
         error ? h('div', { className: 'wb2p-error' }, error) : null,
         note ? h('div', { className: 'wb2p-note' }, note) : null,
+        providerWarning ? h('div', { className: 'wb2p-error' }, providerWarning) : null,
         h(
           'div',
           { className: 'wb2p-tabs' },

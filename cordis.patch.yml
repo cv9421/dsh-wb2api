@@ -4,4 +4,6 @@
       config:
         baseUrl: http://127.0.0.1:7863
         apiKey: ''
-        panelDir: 'C:\Users\CinderLumes\Desktop\as\workbuddy2api-panel'
+        # 留空 = 自动发现（WB2API_PANEL_DIR -> 插件同级 ..\workbuddy2api-panel -> cwd -> 桌面）。
+        # 找不到时插件退化为「远程网关模式」：面板/工具照常，进程管理不可用。
+        panelDir: ''
