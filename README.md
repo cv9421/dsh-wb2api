@@ -41,6 +41,39 @@ pwsh -File scripts/push.ps1
 ```
 
 脚本会临时摘掉 insteadOf、自动探测可用代理、推送后还原全局配置。**前提：Clash Verge 主程序已启动**（`clash-verge-service` 在跑不代表端口在听）。
+## 别人怎么装（先看这三条前提）
+
+**1）这个插件只是壳，后端要你自己跑。** 仓库里没有 `wb2api` 二进制——它属于上游 Go 项目 [workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)。没跑网关时，插件能装、页面能开，但只有「未连接」。
+
+**2）装完必须改配置，否则全 401。** `cordis.patch.yml` 里的 `panelDir` 是维护者本机路径。三种配法任选：
+
+| 你想做什么 | 需要配的字段 |
+|---|---|
+| 只管远程网关（读账号/用量/日志） | `baseUrl` + `apiKey`，**不需要** `panelDir` |
+| 也要启停本机网关进程 | 再加 `panelDir`（面板目录，含 `wb2api.exe`） |
+| 不想改 YAML | 设环境变量 `WB2API_BASE_URL` / `WB2API_KEY` / `WB2API_PANEL_DIR`（优先级高于 YAML） |
+
+没配 `panelDir` 时，页面顶部会出现黄色提示条：只读模式，进程托管不可用——不会静默给你一堆 401。
+
+**3）进程托管是 Windows 优先。** 启停用 `taskkill` + `data/server.pid`；Linux/macOS 走 `process.kill` 分支但未在那边验证过。
+
+### 装法
+
+```powershell
+# 从 GitHub（推荐）
+plugin_manager install_bundle  target=https://github.com/cv9421/dsh-wb2api
+
+# 或先 clone 再按本地目录装
+git clone https://github.com/cv9421/dsh-wb2api
+plugin_manager install_bundle  target=<克隆目录的绝对路径>
+```
+
+装完在 **设置 → WorkBuddy 网关** 里配置；改 `cordis.patch.yml` 后重载：
+
+```powershell
+plugin_manager set_plugin  target=include:wb2api-panel enabled=false
+plugin_manager set_plugin  target=include:wb2api-panel enabled=true
+```
 ## 配置
 
 装配行在 `cordis.patch.yml`，字段也可以用环境变量覆盖（环境变量优先）：

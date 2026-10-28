@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "WorkBuddy2API 网关的管理面板与进程托管，把 workbuddy2api-panel 作为 DSH 插件使用。",
+  "engines": { "node": ">=22.18.0", "dsh": ">=0.2.0-rc.1" },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

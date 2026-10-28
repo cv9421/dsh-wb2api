@@ -233,6 +233,7 @@ export function apply(ctx, config = {}) {
       service,
       baseUrl: baseUrl(),
       panelDir: panelDir(),
+      panelDirExists: Boolean(panelDir()) && existsSync(panelDir()),
       apiConfigured: Boolean(apiKey()),
       overview: overview.ok ? overview.data : null,
       overviewError: overview.ok ? undefined : overview.error || `HTTP ${overview.status}`,
