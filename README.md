@@ -32,6 +32,15 @@ plugin_manager set_plugin     target=include:wb2api-panel enabled=false
 plugin_manager set_plugin     target=include:wb2api-panel enabled=true
 ```
 
+## 推送（本机注意）
+
+本机有三个坑，推送统一用脚本：`url.https://gh-proxy.com/...insteadOf` 会把 GitHub 地址改写成只读代理（push 必失败）、全局 `http.proxy=127.0.0.1:7897`（Clash Verge 没启动时端口是空的）、GitHub 的 receive-pack 直连会被重置。
+
+```powershell
+pwsh -File scripts/push.ps1
+```
+
+脚本会临时摘掉 insteadOf、自动探测可用代理、推送后还原全局配置。**前提：Clash Verge 主程序已启动**（`clash-verge-service` 在跑不代表端口在听）。
 ## 配置
 
 装配行在 `cordis.patch.yml`，字段也可以用环境变量覆盖（环境变量优先）：
