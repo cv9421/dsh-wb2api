@@ -479,7 +479,7 @@ export function apply(ctx, config = {}) {
         if (!args || !args.id) return { ok: false, error: 'id is required' };
         const res = await callPanel('/panel/api/models/toggle', {
           method: 'POST',
-          body: JSON.stringify({ id: args.id, disabled: args.enabled === false }),
+          body: JSON.stringify({ id: args.id, hidden: args.enabled === false, disabled: args.enabled === false }),
         });
         if (res.status === 404) {
           return {
@@ -499,11 +499,15 @@ export function apply(ctx, config = {}) {
       const cfgRes = await callPanel('/panel/api/config');
       const cfg = cfgRes.ok ? unwrapConfig(cfgRes.data) : null;
       const gateCfg = (cfg && cfg.models) || {};
-      // 面板能否直接切换，取决于该二进制是否持久化 models.disabled（它同时带 toggle 端点）。
-      // fork 用的是 models.hidden：配置可隐藏，但面板没有开关，这里如实区分。
-      const toggleAvailable = Array.isArray(gateCfg.disabled);
-      const gateConfigKey = toggleAvailable ? 'disabled' : Array.isArray(gateCfg.hidden) ? 'hidden' : null;
-      const disabledList = gateConfigKey ? gateCfg[gateConfigKey] : [];
+      // 后端自述的 gate（新版二进制）优先；老二进制没有该字段，退回到看配置键。
+      const gateInfo = (res.data && res.data.gate) || null;
+      const toggleAvailable = gateInfo ? Boolean(gateInfo.toggle) : Array.isArray(gateCfg.disabled);
+      const gateConfigKey = (gateInfo && gateInfo.config_key)
+        ? String(gateInfo.config_key)
+        : Array.isArray(gateCfg.disabled) ? 'disabled' : Array.isArray(gateCfg.hidden) ? 'hidden' : null;
+      const disabledList = (gateInfo && Array.isArray(gateInfo.hidden))
+        ? gateInfo.hidden
+        : gateConfigKey ? gateCfg[gateConfigKey] : [];
       return {
         ok: true,
         count: models.length,
